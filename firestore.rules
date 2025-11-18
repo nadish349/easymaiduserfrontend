@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // DEVELOPMENT MODE - More permissive rules for frontend development
+    
+    // Adminonly collection - only service accounts can access
+    match /adminonly/{docId} {
+      allow read, write: if request.auth != null && request.auth.token.firebase.sign_in_provider == 'service_account';
+    }
+    
+    // Crews collection - no public access, only service accounts
+    match /crews/{docId} {
+      allow read, write: if request.auth != null && request.auth.token.firebase.sign_in_provider == 'service_account';
+    }
+    
+    // Zones collection - no public access, only service accounts
+    match /zones/{docId} {
+      allow read, write: if request.auth != null && request.auth.token.firebase.sign_in_provider == 'service_account';
+    }
+    
+    // Pricing collection - read only for authenticated users
+    match /pricing/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false; // No write access for anyone
+    }
+    
+    // Settings collection - allow public read for booking availability and service settings
+    // These are public settings that don't require authentication
+    match /settings/{docId} {
+      // Allow public read for settings (booking availability, service status, etc.)
+      allow read: if true;
+      // Allow write only for authenticated users
+      allow write: if request.auth != null;
+    }
+    
+    // Booking availability settings - allow public read
+    match /settings/booking-availability {
+      allow read: if true;
+      // Allow write only for authenticated users
+      allow write: if request.auth != null;
+    }
+    
+    // Request subscriptions collection - users can create their own requests
+    match /request_subscriptions/{docId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Bookings collection - more permissive for development
+    match /bookings/{docId} {
+      // Allow read/write for authenticated users
+      allow read, write: if request.auth != null;
+      
+      // Relaxed field restrictions for development
+      allow update: if request.auth != null;
+    }
+    
+    // Users collection - users can only access their own data
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow users to access their own notifications subcollection
+      match /notifications/{notificationId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+      
+      // Allow users to access their own bookings subcollection
+      match /bookings/{bookingId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+    
+    // Payment config collection - more permissive for development
+    match /payment_config/{docId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // All other collections require authentication
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+} 
