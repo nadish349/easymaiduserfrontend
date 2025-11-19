@@ -3,17 +3,19 @@ import { Card, CardContent, CardHeader } from './ui/card';
 import { Button } from './ui/button';
 import { CreditCard, Clock, X } from 'lucide-react';
 import { paymentApi } from '../lib/api';
-import { addDoc, collection, doc, updateDoc, increment, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, doc, updateDoc, increment } from 'firebase/firestore';
 import { db } from '../firebase';
+import { loadStripe } from '@stripe/stripe-js';
+import { Elements, CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
 
-// Declare Razorpay types
+// Declare Stripe types
 declare global {
   interface Window {
-    Razorpay: any;
+    Stripe: any;
   }
 }
 
-interface RazorpayPaymentModalProps {
+interface StripePaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
   amount: number;
@@ -23,37 +25,153 @@ interface RazorpayPaymentModalProps {
   onPaymentError?: (error: string) => void;
 }
 
-const RazorpayPaymentModal: React.FC<RazorpayPaymentModalProps> = ({
+// Stripe Payment Form Component
+const StripePaymentForm: React.FC<{
+  bookingId: string;
+  clientSecret: string;
+  onSuccess: (paymentId: string) => void;
+  onError: (error: string) => void;
+  onCancel: () => void;
+}> = ({ bookingId, clientSecret, onSuccess, onError, onCancel }) => {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [processing, setProcessing] = useState(false);
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+
+    if (!stripe || !elements) {
+      return;
+    }
+
+    setProcessing(true);
+
+    const cardElement = elements.getElement(CardElement);
+
+    if (!cardElement) {
+      onError('Card element not found');
+      setProcessing(false);
+      return;
+    }
+
+    try {
+      const { error, paymentIntent } = await stripe.confirmCardPayment(clientSecret, {
+        payment_method: {
+          card: cardElement,
+        },
+      });
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      if (paymentIntent && paymentIntent.status === 'succeeded') {
+        // Verify payment with backend
+        const verifyResponse = await paymentApi.verifyPayment(
+          paymentIntent.id,
+          bookingId
+        );
+
+        if (verifyResponse.success) {
+          onSuccess(paymentIntent.id);
+        } else {
+          throw new Error(verifyResponse.message || 'Payment verification failed');
+        }
+      }
+    } catch (err: any) {
+      console.error('Payment error:', err);
+      onError(err.message || 'Payment failed');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="p-3 border rounded-md">
+        <CardElement
+          options={{
+            style: {
+              base: {
+                fontSize: '16px',
+                color: '#424770',
+                '::placeholder': {
+                  color: '#aab7c4',
+                },
+              },
+              invalid: {
+                color: '#9e2146',
+              },
+            },
+          }}
+        />
+      </div>
+      <div className="flex gap-2">
+        <Button
+          type="submit"
+          disabled={!stripe || processing}
+          className="flex-1 bg-gradient-to-r from-[#ff3c3c] to-[#ff9900] hover:opacity-90"
+        >
+          {processing ? (
+            <span className="flex items-center gap-2">
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+              Processing...
+            </span>
+          ) : (
+            <span className="flex items-center gap-2">
+              <CreditCard className="w-5 h-5" />
+              Pay Now
+            </span>
+          )}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={onCancel}
+          disabled={processing}
+        >
+          Cancel
+        </Button>
+      </div>
+    </form>
+  );
+};
+
+const StripePaymentModal: React.FC<StripePaymentModalProps> = ({
   isOpen,
   onClose,
   amount,
   bookingData,
-  currency = 'INR',
+  currency = 'AED',
   onPaymentSuccess,
   onPaymentError,
 }) => {
   const [loading, setLoading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [createdBookingId, setCreatedBookingId] = useState<string | null>(null);
-  const [scriptLoaded, setScriptLoaded] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [stripePromise, setStripePromise] = useState<any>(null);
+  const [showPaymentForm, setShowPaymentForm] = useState(false);
 
-  // Check if Razorpay script is loaded
+  // Load Stripe
   useEffect(() => {
-    const checkRazorpay = () => {
-      if (window.Razorpay) {
-        setScriptLoaded(true);
-      } else {
-        // Retry after a short delay
-        setTimeout(checkRazorpay, 100);
+    const initStripe = async () => {
+      try {
+        // Get publishable key from backend when creating payment intent
+        setStripePromise(null); // Will be set when payment intent is created
+      } catch (error) {
+        console.error('Error initializing Stripe:', error);
       }
     };
-    checkRazorpay();
+    initStripe();
   }, []);
 
-  // Reset createdBookingId when modal closes
+  // Reset state when modal closes
   useEffect(() => {
     if (!isOpen) {
       setCreatedBookingId(null);
+      setClientSecret(null);
+      setShowPaymentForm(false);
     }
   }, [isOpen]);
 
@@ -94,83 +212,49 @@ const RazorpayPaymentModal: React.FC<RazorpayPaymentModalProps> = ({
   };
 
   const handlePayNow = async () => {
-    if (!window.Razorpay || !scriptLoaded) {
-      onPaymentError?.('Razorpay is loading. Please wait a moment and try again.');
-      return;
-    }
-
     setProcessing(true);
     try {
       // Create booking first
       const bookingId = await createBooking();
 
-      // Create payment order via backend
+      // Create payment intent via backend
       const orderResponse = await paymentApi.createPaymentOrder(bookingId, amount, currency);
 
       if (!orderResponse.success || !orderResponse.data) {
-        throw new Error(orderResponse.message || 'Failed to create payment order');
+        throw new Error(orderResponse.message || 'Failed to create payment intent');
       }
 
-      const { orderId, key, amount: orderAmount } = orderResponse.data;
+      const { clientSecret, publishableKey } = orderResponse.data;
 
-      // Initialize Razorpay checkout
-      const options = {
-        key: key,
-        amount: orderAmount,
-        currency: currency,
-        name: 'EasyMaid Cleaning Services',
-        description: `Payment for Booking ${bookingId}`,
-        order_id: orderId,
-        handler: async function (response: any) {
-          try {
-            // Verify payment with backend
-            const verifyResponse = await paymentApi.verifyPayment(
-              response.razorpay_order_id,
-              response.razorpay_payment_id,
-              response.razorpay_signature,
-              bookingId
-            );
-
-            if (verifyResponse.success) {
-              onPaymentSuccess('paid', response.razorpay_payment_id, response.razorpay_order_id, bookingId);
-              onClose();
-            } else {
-              throw new Error(verifyResponse.message || 'Payment verification failed');
-            }
-          } catch (error: any) {
-            console.error('Payment verification error:', error);
-            onPaymentError?.(error.message || 'Payment verification failed');
-          } finally {
-            setProcessing(false);
-          }
-        },
-        prefill: {
-          name: '',
-          email: '',
-          contact: '',
-        },
-        theme: {
-          color: '#ff3c3c',
-        },
-        modal: {
-          ondismiss: function () {
-            setProcessing(false);
-          },
-        },
-      };
-
-      const razorpay = new window.Razorpay(options);
-      razorpay.on('payment.failed', function (response: any) {
-        console.error('Payment failed:', response);
-        onPaymentError?.(response.error.description || 'Payment failed');
-        setProcessing(false);
-      });
-      razorpay.open();
+      // Initialize Stripe with publishable key
+      const stripe = await loadStripe(publishableKey);
+      setStripePromise(stripe);
+      setClientSecret(clientSecret);
+      setShowPaymentForm(true);
+      setProcessing(false);
     } catch (error: any) {
       console.error('Payment error:', error);
-      onPaymentError?.(error.message || 'Failed to process payment');
+      onPaymentError?.(error.message || 'Failed to initialize payment');
       setProcessing(false);
     }
+  };
+
+  const handlePaymentSuccess = async (paymentId: string) => {
+    if (createdBookingId) {
+      onPaymentSuccess('paid', paymentId, paymentId, createdBookingId);
+      onClose();
+    }
+  };
+
+  const handlePaymentError = (error: string) => {
+    onPaymentError?.(error);
+    setShowPaymentForm(false);
+    setClientSecret(null);
+  };
+
+  const handlePaymentCancel = () => {
+    setShowPaymentForm(false);
+    setClientSecret(null);
   };
 
   const handlePayLater = async () => {
@@ -221,51 +305,61 @@ const RazorpayPaymentModal: React.FC<RazorpayPaymentModalProps> = ({
             Choose your payment method for your booking
           </div>
 
-          {/* Pay Now Button */}
-          <Button
-            onClick={handlePayNow}
-            disabled={processing || loading || !scriptLoaded}
-            className="w-full bg-gradient-to-r from-[#ff3c3c] to-[#ff9900] hover:opacity-90"
-            size="lg"
-          >
-            {!scriptLoaded ? (
-              <span className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                Loading Razorpay...
-              </span>
-            ) : processing ? (
-              <span className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                Processing Payment...
-              </span>
-            ) : (
-              <span className="flex items-center gap-2">
-                <CreditCard className="w-5 h-5" />
-                Pay Now via Razorpay
-              </span>
-            )}
-          </Button>
+          {/* Show Stripe Payment Form or Payment Buttons */}
+          {showPaymentForm && clientSecret && stripePromise ? (
+            <Elements stripe={stripePromise}>
+              <StripePaymentForm
+                bookingId={createdBookingId!}
+                clientSecret={clientSecret}
+                onSuccess={handlePaymentSuccess}
+                onError={handlePaymentError}
+                onCancel={handlePaymentCancel}
+              />
+            </Elements>
+          ) : (
+            <>
+              {/* Pay Now Button */}
+              <Button
+                onClick={handlePayNow}
+                disabled={processing || loading}
+                className="w-full bg-gradient-to-r from-[#ff3c3c] to-[#ff9900] hover:opacity-90"
+                size="lg"
+              >
+                {processing ? (
+                  <span className="flex items-center gap-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                    Initializing Payment...
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    <CreditCard className="w-5 h-5" />
+                    Pay Now via Card
+                  </span>
+                )}
+              </Button>
 
-          {/* Pay Later Button */}
-          <Button
-            onClick={handlePayLater}
-            disabled={processing || loading}
-            variant="outline"
-            className="w-full"
-            size="lg"
-          >
-            {loading ? (
-              <span className="flex items-center gap-2">
-                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
-                Processing...
-              </span>
-            ) : (
-              <span className="flex items-center gap-2">
-                <Clock className="w-5 h-5" />
-                Pay Later
-              </span>
-            )}
-          </Button>
+              {/* Pay Later Button */}
+              <Button
+                onClick={handlePayLater}
+                disabled={processing || loading}
+                variant="outline"
+                className="w-full"
+                size="lg"
+              >
+                {loading ? (
+                  <span className="flex items-center gap-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary"></div>
+                    Processing...
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    <Clock className="w-5 h-5" />
+                    Pay Later
+                  </span>
+                )}
+              </Button>
+            </>
+          )}
 
           <div className="text-xs text-center text-gray-500 mt-4">
             Your payment information is secure and encrypted
@@ -276,5 +370,5 @@ const RazorpayPaymentModal: React.FC<RazorpayPaymentModalProps> = ({
   );
 };
 
-export default RazorpayPaymentModal;
+export default StripePaymentModal;
 

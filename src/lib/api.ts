@@ -48,14 +48,15 @@ async function apiRequest<T>(
  */
 export const paymentApi = {
   /**
-   * Create Razorpay payment order
+   * Create Stripe payment intent
    */
-  createPaymentOrder: async (bookingId: string, amount: number, currency: string = 'INR') => {
+  createPaymentOrder: async (bookingId: string, amount: number, currency: string = 'AED') => {
     return apiRequest<{
-      orderId: string;
+      clientSecret: string;
+      paymentIntentId: string;
       amount: number;
       currency: string;
-      key: string;
+      publishableKey: string;
       bookingId: string;
     }>('/payment/create-order', {
       method: 'POST',
@@ -64,22 +65,20 @@ export const paymentApi = {
   },
 
   /**
-   * Verify Razorpay payment
+   * Verify Stripe payment
    */
   verifyPayment: async (
-    orderId: string,
-    paymentId: string,
-    signature: string,
+    paymentIntentId: string,
     bookingId: string
   ) => {
     return apiRequest<{
       bookingId: string;
       paymentId: string;
-      orderId: string;
+      paymentIntentId: string;
       paymentStatus: string;
     }>('/payment/verify', {
       method: 'POST',
-      body: JSON.stringify({ orderId, paymentId, signature, bookingId }),
+      body: JSON.stringify({ paymentIntentId, bookingId }),
     });
   },
 
